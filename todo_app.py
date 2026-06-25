@@ -931,8 +931,8 @@ class CalendarWindow(tk.Toplevel):
                     bg = COLOR_CAL_SAT
                 else:
                     bg = "white"
-                # 일정(비근무)이 있으면 종류 색을 우선
-                if in_month and evs:
+                # 보이는 날짜 셀에 일정이 있으면 종류 색을 우선
+                if evs:
                     bg = SCHEDULE_COLORS.get(evs[0].kind, bg)
 
                 fg = "#bbbbbb" if not in_month else (
@@ -947,8 +947,9 @@ class CalendarWindow(tk.Toplevel):
                 if in_month:
                     for hol_name in self._holiday_names(cur):
                         lines.append(f"※{hol_name}" if hol_name else "※공휴일")
-                    for ev in evs:
-                        lines.append(f"[{ev.kind}] {ev.title}")
+                for ev in evs:
+                    lines.append(f"[{ev.kind}] {ev.title}")
+                if in_month:
                     due_n = sum(1 for t in self.app.store.tasks
                                 if not t.done and parse_due(t.due) == cur)
                     if due_n:
