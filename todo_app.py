@@ -14,6 +14,7 @@
 import os
 import sys
 import json
+import re
 import uuid
 import shutil
 try:
@@ -492,6 +493,98 @@ def save_settings(d: dict):
         SETTINGS_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+
+_GEOMETRY_RE = re.compile(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$")
+_SIZE_RE = re.compile(r"^(\d+)x(\d+)$")
+
+
+def _parse_geometry(geom: str):
+    m = _GEOMETRY_RE.match(str(geom or "").strip())
+    if not m:
+        return None
+    return tuple(int(v) for v in m.groups())
+
+
+def _geometry_size(geom: str, fallback=(960, 600)):
+    parsed = _parse_geometry(geom)
+    if parsed:
+        return parsed[0], parsed[1]
+    m = _SIZE_RE.match(str(geom or "").strip())
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return fallback
+
+
+def _virtual_screen_rect(widget):
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            left = user32.GetSystemMetrics(76)    # SM_XVIRTUALSCREEN
+            top = user32.GetSystemMetrics(77)     # SM_YVIRTUALSCREEN
+            width = user32.GetSystemMetrics(78)   # SM_CXVIRTUALSCREEN
+            height = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+            if width > 0 and height > 0:
+                return left, top, left + width, top + height
+        except Exception:
+            pass
+    try:
+        left = widget.winfo_vrootx()
+        top = widget.winfo_vrooty()
+        width = widget.winfo_vrootwidth()
+        height = widget.winfo_vrootheight()
+        if width > 0 and height > 0:
+            return left, top, left + width, top + height
+    except Exception:
+        pass
+    return 0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()
+
+
+def _primary_screen_rect(widget):
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            width = user32.GetSystemMetrics(0)   # SM_CXSCREEN
+            height = user32.GetSystemMetrics(1)  # SM_CYSCREEN
+            if width > 0 and height > 0:
+                return 0, 0, width, height
+        except Exception:
+            pass
+    return 0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()
+
+
+def _geometry_is_visible(widget, geom: str) -> bool:
+    parsed = _parse_geometry(geom)
+    if not parsed:
+        return False
+    w, h, x, y = parsed
+    if w <= 0 or h <= 0:
+        return False
+    left, top, right, bottom = _virtual_screen_rect(widget)
+    visible_w = min(x + w, right) - max(x, left)
+    visible_h = min(y + h, bottom) - max(y, top)
+    return visible_w >= min(120, w) and visible_h >= min(80, h)
+
+
+def _centered_geometry(widget, width: int, height: int) -> str:
+    left, top, right, bottom = _primary_screen_rect(widget)
+    screen_w = max(1, right - left)
+    screen_h = max(1, bottom - top)
+    width = min(max(width, 600), max(320, screen_w - 80))
+    height = min(max(height, 360), max(240, screen_h - 80))
+    x = left + max(0, (screen_w - width) // 2)
+    y = top + max(0, (screen_h - height) // 3)
+    return f"{width}x{height}+{x}+{y}"
+
+
+def _safe_geometry(widget, geom: str, fallback="960x600") -> str:
+    raw = str(geom or "").strip()
+    if _geometry_is_visible(widget, raw):
+        return raw
+    width, height = _geometry_size(raw, _geometry_size(fallback))
+    return _centered_geometry(widget, width, height)
 
 
 # ============================================================
@@ -1035,6 +1128,7 @@ class CalendarWindow(tk.Toplevel):
 # ============================================================
 class TodoApp(tk.Tk):
     REFRESH_MS = 10 * 60 * 1000   # 주기적 갱신 간격(10분)
+    DEFAULT_GEOMETRY = "960x600"
 
     def __init__(self):
         super().__init__()
@@ -1045,8 +1139,7 @@ class TodoApp(tk.Tk):
 
         self.title(APP_TITLE)
         self.minsize(600, 360)
-        geom = self.settings.get("geometry")
-        self.geometry(geom if geom else "960x600")
+        self._restore_geometry()
 
         self._setup_style()
 
@@ -1071,12 +1164,50 @@ class TodoApp(tk.Tk):
         self._apply_compact(save=False)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Map>", self._on_mapped, add="+")
+        self.after_idle(self._ensure_window_visible)
         self.refresh()
 
         # 시작 시 '오늘 요약' 팝업 + 주기적 갱신(자정 넘어가도 남은기간 최신화)
         if self.summary_var.get():
             self.after(500, lambda: self._show_summary(on_startup=True))
         self._refresh_job = self.after(self.REFRESH_MS, self._periodic_refresh)
+
+    def _restore_geometry(self):
+        geom = self.settings.get("geometry")
+        self.geometry(_safe_geometry(self, geom, self.DEFAULT_GEOMETRY))
+
+    def _ensure_window_visible(self):
+        try:
+            state = self.state()
+        except tk.TclError:
+            return
+        if state == "withdrawn":
+            self.deiconify()
+            state = self.state()
+        if state == "iconic":
+            return
+        self.update_idletasks()
+        if not _geometry_is_visible(self, self.geometry()):
+            self.geometry(_safe_geometry(self, self.geometry(), self.DEFAULT_GEOMETRY))
+            self.update_idletasks()
+            self.lift()
+
+    def _on_mapped(self, event):
+        if event.widget is self:
+            self.after_idle(self._ensure_window_visible)
+
+    def _window_geometry_to_save(self):
+        try:
+            if self.state() in ("iconic", "withdrawn"):
+                return _safe_geometry(self, self.settings.get("geometry"), self.DEFAULT_GEOMETRY)
+            self.update_idletasks()
+            geom = self.geometry()
+            if _geometry_is_visible(self, geom):
+                return geom
+        except tk.TclError:
+            pass
+        return _safe_geometry(self, self.settings.get("geometry"), self.DEFAULT_GEOMETRY)
 
     # -------- 스타일/폰트 --------
     def _setup_style(self):
@@ -1564,7 +1695,7 @@ class TodoApp(tk.Tk):
         except Exception:
             pass
         self.settings.update({
-            "geometry": self.geometry(),
+            "geometry": self._window_geometry_to_save(),
             "sort": self.sort_mode.get(),
             "filter_cat": self.filter_cat.get(),
             "hide_done": self.hide_done.get(),
