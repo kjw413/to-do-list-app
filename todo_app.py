@@ -97,10 +97,19 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def resource_path(relative_path: str) -> Path:
+    """소스 실행/pyinstaller 번들 실행 모두에서 리소스 파일 경로를 반환."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / relative_path
+    return app_dir() / relative_path
+
+
 DATA_FILE = data_dir() / "tasks.json"
 SETTINGS_FILE = data_dir() / "settings.json"
 SCHEDULE_FILE = data_dir() / "schedules.json"
 HOLIDAY_FILE = app_dir() / "DB_holiday.xlsx"   # 공휴일 DB (A:날짜 B:요일 C:공휴일명)
+APP_ICON_FILE = resource_path("assets/todolist.ico")
+APP_USER_MODEL_ID = "TodoList.DesktopApp"
 
 
 # ============================================================
@@ -1138,6 +1147,7 @@ class TodoApp(tk.Tk):
         self.settings = load_settings()
 
         self.title(APP_TITLE)
+        self._apply_window_icon()
         self.minsize(600, 360)
         self._restore_geometry()
 
@@ -1172,6 +1182,13 @@ class TodoApp(tk.Tk):
         if self.summary_var.get():
             self.after(500, lambda: self._show_summary(on_startup=True))
         self._refresh_job = self.after(self.REFRESH_MS, self._periodic_refresh)
+
+    def _apply_window_icon(self):
+        try:
+            if APP_ICON_FILE.exists():
+                self.iconbitmap(default=str(APP_ICON_FILE))
+        except tk.TclError:
+            pass
 
     def _restore_geometry(self):
         geom = self.settings.get("geometry")
@@ -1724,6 +1741,17 @@ def _enable_dpi_awareness():
             pass
 
 
+def _set_app_user_model_id():
+    """Windows 작업표시줄에서 앱 고유 아이콘으로 묶이도록 설정."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
 def main():
     # 자체 점검: 창을 띄우지 않고 UI 구성만 검증
     if "--selftest" in sys.argv:
@@ -1737,6 +1765,7 @@ def main():
         print("selftest OK")
         return
 
+    _set_app_user_model_id()
     _enable_dpi_awareness()
     try:
         app = TodoApp()
