@@ -915,7 +915,6 @@ class CalendarWindow(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self._render()
         self._center(app)
-        self.grab_set()
 
     def _center(self, parent=None):
         self.update_idletasks()
