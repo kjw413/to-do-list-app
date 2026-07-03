@@ -109,6 +109,7 @@ SETTINGS_FILE = data_dir() / "settings.json"
 SCHEDULE_FILE = data_dir() / "schedules.json"
 HOLIDAY_FILE = app_dir() / "DB_holiday.xlsx"   # 공휴일 DB (A:날짜 B:요일 C:공휴일명)
 APP_ICON_FILE = resource_path("assets/todolist.ico")
+APP_ICON_PNG_FILE = resource_path("assets/todolist.png")
 APP_USER_MODEL_ID = "TodoList.DesktopApp"
 
 
@@ -1184,11 +1185,17 @@ class TodoApp(tk.Tk):
         self._refresh_job = self.after(self.REFRESH_MS, self._periodic_refresh)
 
     def _apply_window_icon(self):
-        try:
-            if APP_ICON_FILE.exists():
+        if APP_ICON_PNG_FILE.exists():
+            try:
+                self._app_icon_image = tk.PhotoImage(file=str(APP_ICON_PNG_FILE))
+                self.iconphoto(True, self._app_icon_image)
+            except tk.TclError:
+                pass
+        if APP_ICON_FILE.exists():
+            try:
                 self.iconbitmap(default=str(APP_ICON_FILE))
-        except tk.TclError:
-            pass
+            except tk.TclError:
+                pass
 
     def _restore_geometry(self):
         geom = self.settings.get("geometry")

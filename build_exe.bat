@@ -46,7 +46,7 @@ if exist "%OUT_EXE%" (
     )
 )
 
-py -m PyInstaller --noconfirm --onefile --windowed --name "%APP_NAME%" --icon "assets\todolist.ico" --add-data "assets\todolist.ico;assets" --hidden-import openpyxl todo_app.py
+py -m PyInstaller --noconfirm --onefile --windowed --name "%APP_NAME%" --icon "assets\todolist.ico" --add-data "assets\todolist.ico;assets" --add-data "assets\todolist.png;assets" --hidden-import openpyxl todo_app.py
 if errorlevel 1 goto fail
 if not exist "%OUT_EXE%" goto fail
 

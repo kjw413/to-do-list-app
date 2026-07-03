@@ -160,6 +160,41 @@ def write_png_bytes(width: int, height: int, pixels: bytes) -> bytes:
     )
 
 
+def write_ico_dib_bytes(width: int, height: int, pixels: bytes) -> bytes:
+    """Return a 32-bit BGRA DIB image payload for an ICO entry.
+
+    Windows Explorer is more reliable with this classic ICO frame format than
+    PNG-compressed ICO entries when an icon is embedded into an executable.
+    """
+    header = struct.pack(
+        "<IIIHHIIIIII",
+        40,              # BITMAPINFOHEADER size
+        width,
+        height * 2,      # XOR bitmap + 1-bit AND mask
+        1,               # color planes
+        32,              # bits per pixel
+        0,               # BI_RGB
+        width * height * 4,
+        0,
+        0,
+        0,
+        0,
+    )
+
+    xor = bytearray()
+    stride = width * 4
+    for y in range(height - 1, -1, -1):
+        start = y * stride
+        row = pixels[start : start + stride]
+        for x in range(width):
+            r, g, b, a = row[x * 4 : x * 4 + 4]
+            xor.extend((b, g, r, a))
+
+    mask_stride = ((width + 31) // 32) * 4
+    mask = bytes(mask_stride * height)
+    return header + bytes(xor) + mask
+
+
 def render_icon(size: int) -> bytes:
     scale = 4
     canvas = Canvas(size * scale, size * scale)
@@ -204,22 +239,22 @@ def render_icon(size: int) -> bytes:
 
 def main() -> None:
     ASSETS.mkdir(exist_ok=True)
-    png_entries = []
+    ico_entries = []
     for size in SIZES:
         pixels = render_icon(size)
-        png_entries.append((size, write_png_bytes(size, size, pixels)))
+        ico_entries.append((size, write_ico_dib_bytes(size, size, pixels)))
         if size == 256:
-            PNG_PATH.write_bytes(png_entries[-1][1])
+            PNG_PATH.write_bytes(write_png_bytes(size, size, pixels))
 
-    offset = 6 + 16 * len(png_entries)
-    header = struct.pack("<HHH", 0, 1, len(png_entries))
+    offset = 6 + 16 * len(ico_entries)
+    header = struct.pack("<HHH", 0, 1, len(ico_entries))
     entries = bytearray()
     images = bytearray()
-    for size, png in png_entries:
+    for size, image in ico_entries:
         width_byte = 0 if size >= 256 else size
-        entries.extend(struct.pack("<BBBBHHII", width_byte, width_byte, 0, 0, 1, 32, len(png), offset))
-        images.extend(png)
-        offset += len(png)
+        entries.extend(struct.pack("<BBBBHHII", width_byte, width_byte, 0, 0, 1, 32, len(image), offset))
+        images.extend(image)
+        offset += len(image)
 
     ICO_PATH.write_bytes(header + bytes(entries) + bytes(images))
     print(f"wrote {PNG_PATH}")
