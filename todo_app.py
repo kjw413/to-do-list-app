@@ -17,6 +17,7 @@ import json
 import re
 import uuid
 import shutil
+import time
 try:
     import winreg  # Windows 자동 실행 등록용 (표준 라이브러리)
 except ImportError:
@@ -111,6 +112,8 @@ HOLIDAY_FILE = app_dir() / "DB_holiday.xlsx"   # 공휴일 DB (A:날짜 B:요일
 APP_ICON_FILE = resource_path("assets/todolist.ico")
 APP_ICON_PNG_FILE = resource_path("assets/todolist.png")
 APP_USER_MODEL_ID = "TodoList.DesktopApp"
+APP_MUTEX_NAME = r"Local\TodoList.DesktopApp.SingleInstance"
+_APP_MUTEX_HANDLE = None
 
 
 # ============================================================
@@ -526,7 +529,73 @@ def _geometry_size(geom: str, fallback=(960, 600)):
     return fallback
 
 
+def _monitor_rects(widget):
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", RECT),
+                    ("rcWork", RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            rects = []
+            user32 = ctypes.windll.user32
+            monitor_handle = getattr(wintypes, "HMONITOR", wintypes.HANDLE)
+            monitor_proc = ctypes.WINFUNCTYPE(
+                wintypes.BOOL,
+                monitor_handle,
+                wintypes.HDC,
+                ctypes.POINTER(RECT),
+                wintypes.LPARAM,
+            )
+
+            def _callback(hmonitor, hdc, lprect, lparam):
+                info = MONITORINFO()
+                info.cbSize = ctypes.sizeof(MONITORINFO)
+                if user32.GetMonitorInfoW(hmonitor, ctypes.byref(info)):
+                    r = info.rcMonitor
+                    rects.append((r.left, r.top, r.right, r.bottom))
+                elif lprect:
+                    r = lprect.contents
+                    rects.append((r.left, r.top, r.right, r.bottom))
+                return True
+
+            if user32.EnumDisplayMonitors(None, None, monitor_proc(_callback), 0) and rects:
+                return rects
+        except Exception:
+            pass
+    try:
+        left = widget.winfo_vrootx()
+        top = widget.winfo_vrooty()
+        width = widget.winfo_vrootwidth()
+        height = widget.winfo_vrootheight()
+        if width > 0 and height > 0:
+            return [(left, top, left + width, top + height)]
+    except Exception:
+        pass
+    return [(0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())]
+
 def _virtual_screen_rect(widget):
+    rects = _monitor_rects(widget)
+    if rects:
+        left = min(r[0] for r in rects)
+        top = min(r[1] for r in rects)
+        right = max(r[2] for r in rects)
+        bottom = max(r[3] for r in rects)
+        return left, top, right, bottom
     if sys.platform == "win32":
         try:
             import ctypes
@@ -1145,6 +1214,7 @@ class TodoApp(tk.Tk):
         self.sched = ScheduleStore()
         WORK_CALENDAR.set_events(self.sched.events)   # 비근무일 초기화
         self.settings = load_settings()
+        self._last_visible_geometry = self.settings.get("geometry")
 
         self.title(APP_TITLE)
         self._apply_window_icon()
@@ -1175,6 +1245,7 @@ class TodoApp(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Map>", self._on_mapped, add="+")
+        self.bind("<Configure>", self._on_configured, add="+")
         self.after_idle(self._ensure_window_visible)
         self.refresh()
 
@@ -1198,7 +1269,9 @@ class TodoApp(tk.Tk):
 
     def _restore_geometry(self):
         geom = self.settings.get("geometry")
-        self.geometry(_safe_geometry(self, geom, self.DEFAULT_GEOMETRY))
+        safe_geom = _safe_geometry(self, geom, self.DEFAULT_GEOMETRY)
+        self.geometry(safe_geom)
+        self._last_visible_geometry = safe_geom
 
     def _ensure_window_visible(self):
         try:
@@ -1220,17 +1293,34 @@ class TodoApp(tk.Tk):
         if event.widget is self:
             self.after_idle(self._ensure_window_visible)
 
+    def _on_configured(self, event):
+        if event.widget is self:
+            self._remember_visible_geometry()
+
+    def _remember_visible_geometry(self):
+        try:
+            if self.state() in ("iconic", "withdrawn"):
+                return
+            geom = self.geometry()
+            if _geometry_is_visible(self, geom):
+                self._last_visible_geometry = geom
+        except tk.TclError:
+            pass
+
     def _window_geometry_to_save(self):
         try:
             if self.state() in ("iconic", "withdrawn"):
-                return _safe_geometry(self, self.settings.get("geometry"), self.DEFAULT_GEOMETRY)
+                geom = self._last_visible_geometry or self.settings.get("geometry")
+                return _safe_geometry(self, geom, self.DEFAULT_GEOMETRY)
             self.update_idletasks()
             geom = self.geometry()
             if _geometry_is_visible(self, geom):
+                self._last_visible_geometry = geom
                 return geom
         except tk.TclError:
             pass
-        return _safe_geometry(self, self.settings.get("geometry"), self.DEFAULT_GEOMETRY)
+        geom = self._last_visible_geometry or self.settings.get("geometry")
+        return _safe_geometry(self, geom, self.DEFAULT_GEOMETRY)
 
     # -------- 스타일/폰트 --------
     def _setup_style(self):
@@ -1758,6 +1848,81 @@ def _set_app_user_model_id():
         pass
 
 
+def _claim_single_instance() -> bool:
+    """실행 중인 앱이 없으면 mutex를 잡고 True를 반환한다."""
+    global _APP_MUTEX_HANDLE
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.CreateMutexW(None, False, APP_MUTEX_NAME)
+        if not handle:
+            return True
+        if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        _APP_MUTEX_HANDLE = handle
+        return True
+    except Exception:
+        return True
+
+
+def _activate_existing_window():
+    """이미 실행 중일 때 기존 창을 작업표시줄 클릭처럼 복원/최소화한다."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.FindWindowW.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR)
+        user32.FindWindowW.restype = wintypes.HWND
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.IsIconic.argtypes = (wintypes.HWND,)
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
+        user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+
+        hwnd = None
+        for _ in range(20):
+            hwnd = user32.FindWindowW(None, APP_TITLE)
+            if hwnd:
+                break
+            time.sleep(0.05)
+        if not hwnd:
+            return
+
+        def _pid_for(window):
+            pid = wintypes.DWORD()
+            if window:
+                user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
+            return pid.value
+
+        main_pid = _pid_for(hwnd)
+        foreground_pid = _pid_for(user32.GetForegroundWindow())
+        same_app_foreground = main_pid and foreground_pid == main_pid
+
+        SW_SHOW = 5
+        SW_MINIMIZE = 6
+        SW_RESTORE = 9
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(hwnd)
+        elif same_app_foreground:
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
+        else:
+            user32.ShowWindow(hwnd, SW_SHOW)
+            user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
 def main():
     # 자체 점검: 창을 띄우지 않고 UI 구성만 검증
     if "--selftest" in sys.argv:
@@ -1772,6 +1937,9 @@ def main():
         return
 
     _set_app_user_model_id()
+    if not _claim_single_instance():
+        _activate_existing_window()
+        return
     _enable_dpi_awareness()
     try:
         app = TodoApp()
