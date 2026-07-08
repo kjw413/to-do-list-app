@@ -641,11 +641,12 @@ def _geometry_is_visible(widget, geom: str) -> bool:
     w, h, x, y = parsed
     if w <= 0 or h <= 0:
         return False
-    left, top, right, bottom = _virtual_screen_rect(widget)
-    visible_w = min(x + w, right) - max(x, left)
-    visible_h = min(y + h, bottom) - max(y, top)
-    return visible_w >= min(120, w) and visible_h >= min(80, h)
-
+    for left, top, right, bottom in _monitor_rects(widget):
+        visible_w = min(x + w, right) - max(x, left)
+        visible_h = min(y + h, bottom) - max(y, top)
+        if visible_w >= min(120, w) and visible_h >= min(80, h):
+            return True
+    return False
 
 def _centered_geometry(widget, width: int, height: int) -> str:
     left, top, right, bottom = _primary_screen_rect(widget)
@@ -1215,6 +1216,7 @@ class TodoApp(tk.Tk):
         WORK_CALENDAR.set_events(self.sched.events)   # 비근무일 초기화
         self.settings = load_settings()
         self._last_visible_geometry = self.settings.get("geometry")
+        self._geometry_save_job = None
 
         self.title(APP_TITLE)
         self._apply_window_icon()
@@ -1284,10 +1286,14 @@ class TodoApp(tk.Tk):
         if state == "iconic":
             return
         self.update_idletasks()
-        if not _geometry_is_visible(self, self.geometry()):
-            self.geometry(_safe_geometry(self, self.geometry(), self.DEFAULT_GEOMETRY))
-            self.update_idletasks()
-            self.lift()
+        geom = self.geometry()
+        if _geometry_is_visible(self, geom):
+            self._last_visible_geometry = geom
+            return
+        fallback = self._last_visible_geometry or self.settings.get("geometry")
+        self.geometry(_safe_geometry(self, fallback, self.DEFAULT_GEOMETRY))
+        self.update_idletasks()
+        self.lift()
 
     def _on_mapped(self, event):
         if event.widget is self:
@@ -1303,9 +1309,26 @@ class TodoApp(tk.Tk):
                 return
             geom = self.geometry()
             if _geometry_is_visible(self, geom):
-                self._last_visible_geometry = geom
+                if geom != self._last_visible_geometry:
+                    self._last_visible_geometry = geom
+                    self._queue_geometry_save()
         except tk.TclError:
             pass
+
+    def _queue_geometry_save(self):
+        try:
+            if self._geometry_save_job is not None:
+                self.after_cancel(self._geometry_save_job)
+            self._geometry_save_job = self.after(500, self._save_window_geometry_pref)
+        except tk.TclError:
+            self._geometry_save_job = None
+
+    def _save_window_geometry_pref(self):
+        self._geometry_save_job = None
+        geom = self._last_visible_geometry
+        if geom and _geometry_is_visible(self, geom):
+            self.settings["geometry"] = geom
+            save_settings(self.settings)
 
     def _window_geometry_to_save(self):
         try:
@@ -1807,6 +1830,12 @@ class TodoApp(tk.Tk):
             self.after_cancel(self._refresh_job)
         except Exception:
             pass
+        try:
+            if self._geometry_save_job is not None:
+                self.after_cancel(self._geometry_save_job)
+        except Exception:
+            pass
+        self._geometry_save_job = None
         self.settings.update({
             "geometry": self._window_geometry_to_save(),
             "sort": self.sort_mode.get(),
