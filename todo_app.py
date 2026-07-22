@@ -779,7 +779,7 @@ class TaskDialog(tk.Toplevel):
         self.columnconfigure(1, weight=1)
 
         # 단축키/포커스
-        self.bind("<Return>", lambda e: self._on_save())
+        self.bind("<Return>", self._on_return)
         self.bind("<Escape>", lambda e: self._on_cancel())
         e_title.focus_set()
         e_title.icursor("end")
@@ -788,6 +788,12 @@ class TaskDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self._center(parent)
         self.grab_set()
+
+    def _on_return(self, event):
+        if event.widget is self.txt_note:
+            return None
+        self._on_save()
+        return "break"
 
     def _center(self, parent):
         self.update_idletasks()
@@ -897,7 +903,7 @@ class ScheduleDialog(tk.Toplevel):
         ttk.Button(btns, text="취소", command=self._on_cancel).pack(side="right")
 
         self.columnconfigure(1, weight=1)
-        self.bind("<Return>", lambda e: self._on_save())
+        self.bind("<Return>", self._on_return)
         self.bind("<Escape>", lambda e: self._on_cancel())
         e_title.focus_set()
         e_title.icursor("end")
@@ -905,6 +911,12 @@ class ScheduleDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self._center(parent)
         self.grab_set()
+
+    def _on_return(self, event):
+        if event.widget is self.txt_note:
+            return None
+        self._on_save()
+        return "break"
 
     def _center(self, parent):
         self.update_idletasks()
